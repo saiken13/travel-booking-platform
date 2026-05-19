@@ -1,0 +1,139 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    environment: staging
+    if: github.ref == 'refs/heads/main'
+    needs: []
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build client
+        working-directory: client
+        run: |
+          npm ci
+          npm run build
+        env:
+          VITE_API_URL: ${{ secrets.STAGING_API_URL }}
+          VITE_APP_ENV: staging
+
+      - name: Build server
+        working-directory: server
+        run: |
+          npm ci
+          npm run build
+
+      # AWS S3 deploy for client (static assets)
+      - name: Deploy client to S3
+        if: ${{ secrets.AWS_ACCESS_KEY_ID != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Sync to S3
+        if: ${{ secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_S3_BUCKET_STAGING != '' }}
+        run: |
+          aws s3 sync client/dist/ s3://${{ secrets.AWS_S3_BUCKET_STAGING }}/  \
+            --delete \
+            --cache-control "public, max-age=31536000, immutable" \
+            --exclude "index.html"
+          aws s3 cp client/dist/index.html s3://${{ secrets.AWS_S3_BUCKET_STAGING }}/index.html \
+            --cache-control "no-cache, no-store, must-revalidate"
+
+      # EC2 zero-downtime deploy for server
+      - name: Deploy server to EC2
+        if: ${{ secrets.EC2_HOST_STAGING != '' && secrets.EC2_SSH_KEY != '' }}
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST_STAGING }}
+          username: ${{ secrets.EC2_USER || 'ubuntu' }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd /app/travel-booking-platform
+            git pull origin main
+            cd server
+            npm ci --production
+            npm run build
+            # Zero-downtime restart with PM2
+            pm2 reload ecosystem.config.js --env staging || pm2 start ecosystem.config.js --env staging
+            pm2 save
+
+      - name: Health check
+        if: ${{ secrets.STAGING_API_URL != '' }}
+        run: |
+          sleep 10
+          curl -f ${{ secrets.STAGING_API_URL }}/health || echo "Health check failed — check server logs"
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    environment: production
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production'
+    needs: []
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build client (production)
+        working-directory: client
+        run: |
+          npm ci
+          npm run build
+        env:
+          VITE_API_URL: ${{ secrets.PROD_API_URL }}
+          VITE_APP_ENV: production
+
+      - name: Build server
+        working-directory: server
+        run: |
+          npm ci
+          npm run build
+
+      - name: Deploy to production
+        if: ${{ secrets.EC2_HOST_PROD != '' && secrets.EC2_SSH_KEY != '' }}
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST_PROD }}
+          username: ${{ secrets.EC2_USER || 'ubuntu' }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd /app/travel-booking-platform
+            git pull origin main
+            cd server
+            npm ci --production
+            npm run build
+            pm2 reload ecosystem.config.js --env production || pm2 start ecosystem.config.js --env production
+            pm2 save

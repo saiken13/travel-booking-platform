@@ -293,11 +293,24 @@ export const resolvers = {
         throw new Error(`Invalid event_type. Must be one of: ${validEventTypes.join(', ')}`);
       }
 
+      // Accept either a UUID or an experiment name — look up by name if not a UUID
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      let resolvedId: string | null = null;
+      if (uuidRegex.test(experimentId)) {
+        resolvedId = experimentId;
+      } else {
+        const lookup = await pool.query(
+          'SELECT id FROM experiments WHERE name = $1 LIMIT 1',
+          [experimentId]
+        );
+        resolvedId = lookup.rows[0]?.id ?? null;
+      }
+
       const result = await pool.query(
         `INSERT INTO experiment_events (experiment_id, variant, user_id, event_type, metadata)
          VALUES ($1, $2, $3, $4, $5)
          RETURNING id`,
-        [experimentId, variant, userId || null, eventType, metadata ? JSON.parse(metadata) : null]
+        [resolvedId, variant, userId || null, eventType, metadata ? JSON.parse(metadata) : null]
       );
 
       return { success: true, eventId: result.rows[0].id };

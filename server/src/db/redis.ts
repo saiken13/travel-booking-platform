@@ -14,10 +14,13 @@ export const getRedisClient = (): Redis => {
       enableOfflineQueue: false,
     });
 
+    let warnedOnce = false;
     redisClient.on('connect', () => console.log('✅ Redis connected'));
     redisClient.on('error', (err) => {
-      // Log but don't crash — cache misses are acceptable
-      console.warn('⚠️  Redis error (cache disabled):', err.message);
+      if (!warnedOnce) {
+        console.warn('⚠️  Redis unavailable (cache disabled):', err.message);
+        warnedOnce = true;
+      }
     });
   }
   return redisClient;

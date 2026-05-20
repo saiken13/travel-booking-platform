@@ -209,6 +209,32 @@ export const resolvers = {
         ? { departure: departureDate, return: returnDate }
         : { checkIn, checkOut };
 
+      // The frontend sends a localStorage UUID as userId — auto-create the user
+      // from traveler details so the FK constraint is satisfied.
+      let resolvedUserId: string | null = null;
+      if (userId) {
+        const exists = await pool.query('SELECT id FROM users WHERE id = $1', [userId]);
+        if (exists.rows.length > 0) {
+          resolvedUserId = userId;
+        } else {
+          try {
+            const parsed = bookingData ? JSON.parse(bookingData) : null;
+            const t = parsed?.travelers?.[0];
+            const email = t?.email || `guest_${userId.slice(0, 8)}@skybook.app`;
+            const name = t ? `${t.firstName} ${t.lastName}`.trim() : 'Guest';
+            const upsert = await pool.query(
+              `INSERT INTO users (id, email, name) VALUES ($1, $2, $3)
+               ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name
+               RETURNING id`,
+              [userId, email, name]
+            );
+            resolvedUserId = upsert.rows[0].id;
+          } catch {
+            resolvedUserId = null;
+          }
+        }
+      }
+
       const result = await pool.query(
         `INSERT INTO bookings (user_id, type, origin, destination, dates, price, status, booking_data)
          VALUES ($1, $2, $3, $4, $5, $6, 'confirmed', $7)
@@ -216,7 +242,7 @@ export const resolvers = {
                    dates, price, status, booking_data as "bookingData",
                    created_at as "createdAt"`,
         [
-          userId || null,
+          resolvedUserId,
           type,
           origin || null,
           destination,
